@@ -1,142 +1,204 @@
-Okay this is sharp. The fraud/duress angle is genuinely novel and has real commercial value to Bunq — let me help you pressure-test and expand it fast.
+# IDEA.md — Project "Consent" *(working name)*
+
+> **Tagline: Authentication ≠ Intent.**
+> Banks verify *who* you are. We verify *whether you actually want to.*
 
 ---
 
-## The Core Idea, Sharpened
+## The Problem
 
-**Name candidate:** "Verify" / "SafeVoice" / "Pulse" — something that implies liveness + emotional check
+Every modern bank can prove it's *you* making a transaction — FaceID, fingerprint, PIN, device fingerprint. None of them can tell whether you actually *want* to make it.
 
-**The pitch in one sentence:**
-*When a high-value transaction fires, we intercept it, ask you to read a short sentence, and use voice emotion analysis to silently detect duress — blocking the transaction if you're being coerced, and acting as a financial advisor if you're just unsure.*
+This gap is the core of the fastest-growing fraud category in Europe: **Authorized Push Payment (APP) fraud**. The fraudster doesn't steal your credentials — they convince *you* to send the money. Romance scams, fake bank calls, fake investment schemes, family coercion, elder abuse. The victim authenticates perfectly. The bank sees a clean transaction. The money is gone.
 
-This is two products in one demo, which is actually good for a hackathon — you have a safety story AND a UX story.
+APP fraud cost European consumers billions last year. Under PSD3, banks face increasing liability for failing to detect coerced or manipulated transactions. There is no current technical solution that distinguishes a willing transfer from a coerced one.
 
----
-
-## The Two Modes
-
-**Mode 1 — Silent Fraud / Duress Detection**
-Transaction over €500 triggers → Bunq webhook → app opens dialogue → user reads a sentence → Hume analyzes prosody in real time → if distress/fear signals exceed threshold → transaction is flagged/blocked → silent alert sent (to Bunq, to a trusted contact)
-
-The key insight that makes this real: the sentence the user reads is **neutral on purpose**. Something like "I confirm this payment to [merchant] for [amount]." You're not asking them how they feel. You're giving a coerced person plausible deniability — they read the sentence, the AI detects the fear they couldn't express, the transaction gets flagged without tipping off whoever is watching them.
-
-**Mode 2 — Financial Advisor**
-Same dialogue, but for non-distress cases. While they're reading or after, Claude has already pulled their Bunq data — balance, recent spending in category, upcoming bills. If Hume says they're calm but hesitant, or excited/impulsive, the assistant speaks up with context before they confirm.
+We're building it.
 
 ---
 
-## The Architecture
+## The Core Idea
+
+A transaction protection layer that verifies **intent**, not just identity, by combining:
+
+1. **A behavioral risk score** on every transaction
+2. **Emotional verification** via voice (Hume) for medium-risk transactions
+3. **Environmental + emotional verification** via video (Gemini Live) and voice (Hume) for high-risk transactions
+4. **Soft holds and human review** as fallbacks that protect both the user and the bank
+
+The system never silently blocks. It always creates an audit trail. It always gives the user a path forward. And every interaction generates evidence the bank can use to demonstrate "best effort" intent verification — directly relevant to PSD3 compliance.
+
+---
+
+## How It Works
+
+### Step 1 — Risk Scoring (every transaction)
+
+Every transaction is classified into one of three tiers:
+
+- `NO_RISK`
+- `MID_RISK`
+- `HIGH_RISK`
+
+The classification logic is open to design — possible inputs include:
+
+- Embeddings of past purchases vs. the current one (anomaly detection in vector space)
+- Time of day vs. user's normal pattern
+- Amount relative to a configured limit
+- Merchant familiarity
+- Device, location, and behavioral signals
+
+The risk scoring is **not the main feature of the product** — it's a gate. The novelty is what happens after a transaction is flagged.
+
+### Step 2 — Verification Flow by Tier
 
 ```
-Bunq webhook → transaction ≥ €500 fired
-        │
-        ▼
-App intercepts (push notification or foreground modal)
-        │
-        ▼
-User reads neutral sentence out loud (5 seconds)
-        │
-   ┌────┴────┐
-   │         │
-Hume EVI   Bunq API
-(prosody)  (balance, history,
-           upcoming debits)
-   │         │
-   └────┬────┘
-        │
-      Claude
-   (decision engine)
-        │
-   ┌────┴──────────┐
-   │               │
-DISTRESS        NORMAL
-flag/block     → financial
-silent alert     advisor
-                 response
-                 via EVI voice
+┌─────────────────────────────────────────────────────────────────┐
+│                       NEW TRANSACTION                           │
+└──────────────────────────────┬──────────────────────────────────┘
+                               │
+                               ▼
+                       ┌──────────────┐
+                       │ Risk scoring │
+                       └──────┬───────┘
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        │                     │                     │
+        ▼                     ▼                     ▼
+   ┌─────────┐           ┌─────────┐           ┌──────────┐
+   │ NO_RISK │           │MID_RISK │           │HIGH_RISK │
+   └────┬────┘           └────┬────┘           └────┬─────┘
+        │                     │                     │
+        │                     ▼                     ▼
+        │             ┌───────────────┐    ┌──────────────────┐
+        │             │  Hume voice   │    │  Gemini Live     │
+        │             │  verification │    │  video call      │
+        │             │   (call user, │    │       +          │
+        │             │  ask Qs)      │    │  Hume voice      │
+        │             └───────┬───────┘    │  (simultaneous)  │
+        │                     │            └────────┬─────────┘
+        │            ┌────────┼─────────┐           │
+        │            │        │         │           │
+        │            ▼        ▼         ▼           │
+        │         CLEAN   AMBIGUOUS  FLAGGED        │
+        │           │       │           │           │
+        │           │       ▼           │           │
+        │           │  ┌─────────┐      │           │
+        │           │  │Merchant │      │           │
+        │           │  │ check   │      │           │
+        │           │  └────┬────┘      │           │
+        │           │       │           │           │
+        │           │   ┌───┴───┐       │           │
+        │           │   │       │       │           │
+        │           │  GOOD   BAD       │           │
+        │           │   │       │       │           │
+        │           ▼   ▼       ▼       ▼           │
+        │         ┌─────────┐ ┌──────────────┐      │
+        │         │GO AHEAD │ │ HUMAN REVIEW │◄─────┤ (if check fails)
+        │         └─────────┘ └──────────────┘      │
+        │                                            │
+        └──────────────────►┌─────────┐◄─────────────┘ (if check passes)
+                            │GO AHEAD │
+                            │+ logged │
+                            └─────────┘
 ```
 
----
+### NO_RISK
+Transaction proceeds normally. No interruption.
 
-## The Sentence Design — This Is Important
+### MID_RISK — Voice verification
+1. App initiates a Hume voice call to the user
+2. User is asked a few short questions (Hume captures prosody — fear, distress, calmness, anxiety scores)
+3. Three possible outcomes:
 
-The sentence needs to be:
-- Long enough for Hume to get a good prosody read (~5 seconds of speech)
-- Neutral in content so it doesn't prime emotion
-- Contains the actual transaction details so it feels like a natural confirmation
+| Hume reading | Action |
+|---|---|
+| **Clean** (calm, normal prosody) | Transaction proceeds |
+| **Ambiguous** (~50% suspicious) | Run merchant reputation check. If merchant is reputable → proceed. If merchant is suspicious → escalate to human review |
+| **Flagged** (clear distress, fear, coercion signature) | Escalate to human review |
 
-Suggested template:
-*"I'm authorizing a payment of [amount] euros to [merchant] on [date]."*
+### HIGH_RISK — Video + voice verification
+1. App initiates a simultaneous video + audio call
+2. **Gemini Live** processes the video feed: is the environment safe and consistent (home, office) or suspicious (public space, unfamiliar location, signs of duress)?
+3. **Hume** processes the audio in parallel: emotional state, distress signals, voice consistency
+4. Two outcomes:
 
-Why this works: a scared person reading this will show vocal tremor, elevated pitch, compressed rhythm, flattened affect — exactly what Hume's prosody model captures. A normal person reads it flatly or with mild curiosity. The delta is detectable.
+| Combined reading | Action |
+|---|---|
+| **Pass** | Transaction proceeds. Full audit log retained — useful for the bank as evidence of best-effort intent verification |
+| **Fail** | Transaction immediately frozen. Escalate to Bunq compliance for human review |
 
-You can also add a **liveness check** — randomize one word in the sentence so they can't pre-record it. "I'm authorizing a payment of [amount] euros to [merchant] — please also say today's color: blue." Simple, prevents replay attacks.
+### Soft Holds — applied where possible
+For card payments where the merchant receives an authorization independently of settlement (e.g., Ticketmaster, hotel bookings, retail card transactions), the merchant gets the auth immediately. Settlement is held while verification runs. The user never loses time-sensitive purchases.
 
----
+For irrevocable rails (SEPA transfers, iDEAL), verification happens before the transaction is sent.
 
-## What Hume Returns (Concretely)
+### Human Review
+When verification fails or escalates:
 
-Hume's prosody model returns continuous scores across ~48 emotional dimensions. The ones you care about:
-
-- `Fear` — direct coercion signal
-- `Distress` — general duress
-- `Nervousness` / `Anxiety` — softer signal, combine with others
-- `Calmness` — your baseline green light
-- `Excitement` — impulse buy signal for Mode 2
-
-Your decision logic is simple:
-
-```python
-def assess_transaction(prosody_scores, financial_context):
-    fear = prosody_scores['fear']
-    distress = prosody_scores['distress']
-    calmness = prosody_scores['calmness']
-    
-    # Hard block
-    if fear > 0.6 or distress > 0.7:
-        return "BLOCK", "silent_alert"
-    
-    # Soft flag — ask again differently
-    if fear > 0.3 and calmness < 0.4:
-        return "HOLD", "check_in"
-    
-    # Financial advisor mode
-    if calmness > 0.6:
-        return "APPROVE", financial_advice(financial_context)
-```
+- Transaction is held
+- A ticket is opened with Bunq compliance
+- Compliance contacts the user through a registered backup channel (not the channel that initiated the transaction)
+- Transaction is held until explicitly approved by compliance + the user
+- The full Hume + Gemini audit trail is attached to the ticket
 
 ---
 
-## What Makes This Winnable
+## Why This Matters
 
-**It's real.** Banks spend billions on fraud. Coerced transaction fraud ("grandparent scams", robbery, intimate partner financial abuse) has no technical solution today. This is a genuine gap.
+### For the user
+- **Real protection against social engineering.** The most common modern fraud type — being convinced to send money under false pretenses — has no current defense. This is one.
+- **Coercion safety net.** Family pressure, abuse, manipulation. Your bank notices when something feels off, even when you can't say it.
+- **No friction in normal life.** NO_RISK transactions go through normally — most users will rarely encounter the verification flow at all.
+- **No lost purchases.** Soft holds mean time-sensitive purchases (event tickets, flight bookings) are never blocked while verification runs in the background.
 
-**Bunq specifically** is a neobank that markets itself on smart features and user trust. This fits their brand perfectly — they'd actually ship this.
-
-**The demo is visceral.** You show a €600 transaction firing, the dialogue appearing, someone reading the sentence in a scared voice, the transaction getting blocked silently. Judges will feel it.
-
-**The dual mode is clever.** One tech stack, two use cases — safety for the edge case, financial advisor for the everyday case. You're not a niche fraud tool, you're a transaction companion.
-
----
-
-## What to Build in the Next Few Hours
-
-Prioritize in this order:
-
-1. **Bunq sandbox webhook** → triggers on transaction amount threshold. Get this working first, everything else depends on it.
-2. **Hume EVI WebSocket** → open connection, stream mic audio, get prosody scores back. Their quickstart is ~30 lines of JS.
-3. **Decision logic** → the three-branch classifier above. Keep it simple.
-4. **Claude + Bunq data** → parallel call while Hume is processing. Pull balance and recent transactions, generate advisor text.
-5. **UI** → modal that appears on transaction trigger, shows the sentence to read, plays the voice response. Can be a single HTML page.
-
-Don't over-engineer the UI. The logic is the demo, not the design.
+### For the bank
+- **PSD3 compliance angle.** Every verified transaction generates an audit trail proving the bank took reasonable steps to verify intent. This is directly relevant to liability under emerging EU regulation.
+- **Reduced fraud losses.** APP fraud is the fastest growing category and the hardest to prevent. Even partial coverage is meaningful.
+- **Brand differentiation.** Bunq is positioned as a smart, user-aligned bank. This product directly extends that brand into a real safety story competitors don't have.
+- **Optional money-back guarantee** *(possibility, not committed):* "If our verification system clears a transaction and it later turns out to be fraudulent, we investigate and refund." This creates a powerful trust signal and is insurable because the post-verification fraud rate is genuinely low.
 
 ---
 
-## The One Risk to Address for Judges
+## What This Is *Not*
 
-They'll ask: *"What if Hume gives a false positive and blocks a legitimate transaction?"*
+- Not a replacement for FaceID/PIN/device authentication. It runs *on top* of normal auth.
+- Not a tool for blocking transactions silently. Every flag has a path forward.
+- Not a kidnapping/physical-coercion solution. We do not lead with this case — it raises more product questions than it answers. We focus on social engineering, APP fraud, and coercive financial relationships, which are far more common and where emotional signals are reliably useful.
+- Not perfect. Hume and Gemini are signals, not oracles. The system is designed so that imperfect signals still produce useful protection through layered verification + human review.
 
-Your answer: **it never hard-blocks unilaterally.** It flags and holds for 60 seconds while sending a secondary verification — a push notification to a trusted contact, or a second channel confirmation. The user always has an override path. You're adding friction to fraud, not removing agency from users.
+---
 
-Go build it. This is a real product.
+## Demo Narrative (for judges)
+
+**Lead with the problem:**
+*"APP fraud cost European consumers billions last year. The fastest growing fraud type isn't hackers — it's criminals convincing you to send money yourself. No bank today can tell the difference between a willing transfer and a coerced one. We can."*
+
+**Show the demo:**
+1. A normal €40 grocery transaction goes through silently — `NO_RISK`.
+2. A €600 unusual transaction triggers a voice check. User reads a sentence calmly. Hume returns clean scores. Transaction proceeds.
+3. Same transaction, but the user reads the sentence under simulated stress (fast pace, shaky voice). Hume flags it. The transaction is held. A compliance ticket is opened.
+4. A €5,000 transaction triggers the video + audio call. Gemini processes the environment, Hume processes the voice. Show both signals working in parallel.
+
+**Close with the bank value:**
+*"Every interaction generates an audit trail. Every flag protects the user and the bank. This is what PSD3 compliance looks like as a product."*
+
+---
+
+## Technical Stack *(to be detailed separately)*
+
+- **Hume Expression Measurement API** — voice emotion analysis (prosody)
+- **Gemini Live API** — video + audio environmental verification
+- **Claude (Sonnet 4.6)** — orchestration, decision logic, audit trail generation
+- **Bunq sandbox API** — transaction interception and webhook integration
+- **Embeddings (Gemini Embedding 2 or similar)** — possible component of risk scoring
+
+---
+
+## Open Questions for the Team
+
+- Concrete implementation of risk scoring — embeddings vs. rule-based vs. hybrid?
+- Demo flow: do we show all three tiers, or focus on one for impact?
+- Mock vs. real Bunq API integration in the demo?
+- Money-back guarantee framing: include in pitch or hold for future?
+- Naming — "Consent" is a working title, open to better suggestions
