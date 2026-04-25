@@ -1,8 +1,11 @@
-"""Gemini Live integration — environment + duress analysis from video frames.
+"""Gemini integration — environment analysis (frontend-driven) and embeddings.
 
-Real path opens a Gemini Live session, streams the collected JPEG frames
-(and optionally audio), then asks the model for a structured JSON summary.
-Mock path returns a canned GeminiSummary.
+The frontend now opens its own Gemini Live session and forwards summaries via
+the WS as `client_gemini` events; the backend's analyze_av path remains as a
+fallback when the frontend can't (or won't) supply a summary.
+
+The embed_text helper uses gemini-embedding-2 (multimodal-capable, GA 2026-04-22)
+for the behavioral risk classifier in services/risk_embeddings.py.
 """
 
 from __future__ import annotations
@@ -17,6 +20,64 @@ from ..state import state
 from . import mocks
 
 log = structlog.get_logger()
+
+EMBED_MODEL = "gemini-embedding-2"
+EMBED_DIM = 768  # MRL truncation — plenty for ~100 vectors per user
+
+
+async def embed_text(text: str) -> list[float] | None:
+    """Embed a single string with gemini-embedding-2. Returns None if unavailable."""
+    if state.mock_mode or not settings.google_api_key:
+        return None
+    try:
+        from google import genai
+
+        client = genai.Client(api_key=settings.google_api_key)
+        resp = await client.aio.models.embed_content(
+            model=EMBED_MODEL,
+            contents=text,
+            config={"output_dimensionality": EMBED_DIM},
+        )
+        if not getattr(resp, "embeddings", None):
+            return None
+        return list(resp.embeddings[0].values)
+    except Exception as e:  # noqa: BLE001
+        log.warning("embed_failed", error=str(e), text_preview=text[:80])
+        return None
+
+
+async def embed_texts(texts: list[str]) -> list[list[float] | None]:
+    """Batch-embed many strings in a single API call.
+
+    Returns a list aligned with `texts`; entries are None for any individual
+    embedding that failed (whole-batch failure → all None).
+    """
+    if not texts:
+        return []
+    if state.mock_mode or not settings.google_api_key:
+        return [None] * len(texts)
+    try:
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=settings.google_api_key)
+        contents = [types.Content(parts=[types.Part(text=t)]) for t in texts]
+        resp = await client.aio.models.embed_content(
+            model=EMBED_MODEL,
+            contents=contents,
+            config={"output_dimensionality": EMBED_DIM},
+        )
+        embs = getattr(resp, "embeddings", None) or []
+        out: list[list[float] | None] = []
+        for i in range(len(texts)):
+            if i < len(embs) and embs[i] is not None:
+                out.append(list(embs[i].values))
+            else:
+                out.append(None)
+        return out
+    except Exception as e:  # noqa: BLE001
+        log.warning("embed_batch_failed", error=str(e), count=len(texts))
+        return [None] * len(texts)
 
 _PROMPT = """Analyze this short video + audio clip of a user confirming a bank transaction.
 Return STRICT JSON with keys:
@@ -40,14 +101,32 @@ async def analyze_av(jpeg_frames: list[bytes], audio_pcm: bytes | None) -> Gemin
 
 
 async def _analyze_real(jpeg_frames: list[bytes], audio_pcm: bytes | None) -> GeminiSummary:
+    """One-shot multimodal call. Audio omitted — Gemini doesn't take raw PCM
+    via generate_content, and the per-question Hume scoring already covers the
+    voice signal. Frames-only is the right shape for environment analysis.
+    """
+    import base64
+
     from google import genai  # type: ignore[import-not-found]
+
+    if not jpeg_frames:
+        # No frames to analyze — return a neutral summary.
+        return GeminiSummary(
+            location_type="unknown",
+            duress_signals=[],
+            confidence=0.0,
+            raw_text="No video frames captured.",
+        )
 
     client = genai.Client(api_key=settings.google_api_key)
     parts: list[dict] = [{"text": _PROMPT}]
     for frame in jpeg_frames[-8:]:  # cap to ~8 frames to keep the request small
-        parts.append({"inline_data": {"mime_type": "image/jpeg", "data": frame}})
-    if audio_pcm:
-        parts.append({"inline_data": {"mime_type": "audio/pcm", "data": audio_pcm}})
+        parts.append({
+            "inline_data": {
+                "mime_type": "image/jpeg",
+                "data": base64.b64encode(frame).decode(),
+            }
+        })
 
     response = await client.aio.models.generate_content(
         model=settings.gemini_model,

@@ -1,7 +1,13 @@
 import { useEffect, useRef } from 'react'
 import { Shield, ShieldAlert, Fingerprint, Activity, AlertTriangle, CheckCircle2, MicOff, Video } from 'lucide-react'
 import type { AudioSource } from '../hooks/useAudioCapture'
-import type { GeminiSummary, HumeScores, Tier } from '../types'
+import type {
+  GeminiSummary,
+  HumeScores,
+  QuestionTurn,
+  Tier,
+  VerificationQuestion,
+} from '../types'
 
 interface Props {
   tier: Tier
@@ -11,6 +17,26 @@ interface Props {
   videoStream: MediaStream | null
   audioSource: AudioSource
   merchant?: string
+  turns: QuestionTurn[]
+  currentQuestion: VerificationQuestion | null
+}
+
+const PURPOSE_LABELS: Record<QuestionTurn['purpose'], string> = {
+  baseline: 'Baseline',
+  intent: 'Intent',
+  context: 'Context',
+  knowledge_check: 'Knowledge',
+  stress_probe: 'Stress probe',
+}
+
+function turnStatusLabel(t: QuestionTurn): { text: string; color: string } {
+  switch (t.status) {
+    case 'pending':   return { text: 'Pending',   color: '#4B5563' }
+    case 'speaking':  return { text: 'Speaking',  color: '#60A5FA' }
+    case 'listening': return { text: 'Listening', color: '#FBBF24' }
+    case 'scoring':   return { text: 'Analyzing', color: '#A78BFA' }
+    case 'done':      return { text: 'Scored',    color: '#4ADE80' }
+  }
 }
 
 const BARS = [
@@ -28,6 +54,8 @@ export default function VerifyingScreen({
   videoStream,
   audioSource,
   merchant,
+  turns,
+  currentQuestion,
 }: Props) {
   const selfViewRef = useRef<HTMLVideoElement>(null)
 
@@ -38,7 +66,9 @@ export default function VerifyingScreen({
     }
   }, [videoStream])
 
-  const isProcessing = countdown <= 0
+  // Phase 2: "processing" now means: all turns done OR (no turns yet, ready event still pending)
+  const allDone = turns.length > 0 && turns.every((t) => t.status === 'done')
+  const isProcessing = !currentQuestion && (allDone || turns.length === 0)
   const isVideo = tier === 'HIGH_RISK'
   const timerStr = `0:${Math.max(0, countdown).toString().padStart(2, '0')}`
 
@@ -105,9 +135,19 @@ export default function VerifyingScreen({
         </div>
 
         <h2 className="text-[22px] font-extrabold mb-1.5 tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-white to-gray-400">Verifying Identity</h2>
-        <p className="text-[13px] font-medium text-gray-400 mb-6 text-center max-w-[200px] leading-relaxed">
+        <p className="text-[13px] font-medium text-gray-400 mb-3 text-center max-w-[200px] leading-relaxed">
           {merchant ? `Securing payment to ${merchant}` : 'Analyzing transaction signals'}
         </p>
+
+        {/* Current spoken question */}
+        {currentQuestion && (
+          <div className="w-full max-w-[330px] bg-white/5 border border-white/10 rounded-2xl px-4 py-3 mb-3 backdrop-blur-md">
+            <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1">
+              {PURPOSE_LABELS[currentQuestion.purpose]}
+            </p>
+            <p className="text-[14px] text-white leading-snug font-medium">"{currentQuestion.text}"</p>
+          </div>
+        )}
 
         {isProcessing ? (
           <div className="flex flex-col items-center gap-3">
@@ -138,8 +178,37 @@ export default function VerifyingScreen({
         )}
       </div>
 
+      {/* Question pipeline */}
+      {turns.length > 0 && (
+        <div className="flex-none px-5 pb-2 z-10">
+          <div className="bg-white/5 border border-white/10 rounded-2xl p-2 space-y-1 backdrop-blur-md">
+            {turns.map((t) => {
+              const lbl = turnStatusLabel(t)
+              const isActive = t.id === currentQuestion?.id
+              return (
+                <div
+                  key={t.id}
+                  className="flex items-center justify-between px-2 py-1 rounded-lg transition-colors"
+                  style={{ background: isActive ? 'rgba(255,255,255,0.06)' : 'transparent' }}
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="w-1.5 h-1.5 rounded-full flex-none" style={{ background: lbl.color }} />
+                    <span className="text-[10px] uppercase tracking-wider text-gray-400 flex-none">
+                      {PURPOSE_LABELS[t.purpose]}
+                    </span>
+                  </div>
+                  <span className="text-[10px] font-semibold flex-none ml-2" style={{ color: lbl.color }}>
+                    {lbl.text}
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Analysis panels */}
-      <div className="flex-1 overflow-y-auto px-5 pb-8 space-y-4 z-10 custom-scrollbar mt-4">
+      <div className="flex-1 overflow-y-auto px-5 pb-8 space-y-4 z-10 custom-scrollbar mt-2">
         {/* Hume bars */}
         <div className="bg-white/5 border border-white/10 rounded-[24px] p-5 backdrop-blur-md relative overflow-hidden">
           <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-white/10 to-transparent" />

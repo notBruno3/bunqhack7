@@ -27,12 +27,16 @@ def status() -> dict:
 
 @router.post("/scenario/{name}")
 def set_scenario(name: str) -> dict:
+    """Set the scenario for mock-fallback hints.
+
+    Phase 3 note: this NO LONGER sets force_tier. The embedding-based risk
+    classifier now decides the tier from real signals (amount + merchant +
+    user history). Scenario remains useful only as a hint for the mock
+    fallback when a provider call fails.
+    """
     if name not in VALID_SCENARIOS:
         raise HTTPException(status_code=404, detail=f"unknown_scenario:{name}")
     state.scenario = name
-    # Scenario name encodes the intended tier; set force_tier to match
-    # so the operator only makes one call.
-    state.force_tier = "HIGH_RISK" if name.startswith("high_") else "MID_RISK"
     return {"scenario": state.scenario, "force_tier": state.force_tier}
 
 
@@ -55,8 +59,15 @@ def toggle(req: MockToggleReq) -> dict:
 
 
 @router.post("/reset")
-def reset() -> dict:
+async def reset() -> dict:
+    from ..services import embedding_cache
+
     mock_bunq.reset_all()
     state.scenario = None
     state.force_tier = None
-    return {"ok": True}
+    # Re-embed the freshly seeded history so the next initiate isn't cold-start.
+    try:
+        await embedding_cache.initialize()
+    except Exception:  # noqa: BLE001
+        pass
+    return {"ok": True, "history_embedded": embedding_cache.cache_size()}

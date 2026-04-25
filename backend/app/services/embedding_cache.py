@@ -1,0 +1,168 @@
+"""In-memory embedding cache for the user's historical transactions.
+
+Pre-embedded at startup (cheap — gemini-embedding-2 is ~$0.20/M tokens, the
+seeded history is well under a thousand tokens total). Keyed by tx_id.
+
+Why in-memory not sqlite-vec: <100 vectors per user, linear scan in numpy is
+sub-millisecond, and shipping a native sqlite extension across Windows demo
+machines is a portability landmine we don't need.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Any
+
+import numpy as np
+import structlog
+from sqlalchemy import select
+
+from ..db import SessionLocal
+from ..integrations.gemini_client import EMBED_DIM, embed_text, embed_texts
+from ..models import Transaction
+from . import risk_embeddings as risk
+
+log = structlog.get_logger()
+
+# tx_id -> L2-normalized np.float32 vector of EMBED_DIM
+_CACHE: dict[str, np.ndarray] = {}
+_INIT_LOCK = asyncio.Lock()
+_INIT_DONE = False
+
+
+def _tx_dict(t: Transaction) -> dict[str, Any]:
+    """Convert a Transaction row to the dict shape risk_embeddings expects."""
+    return {
+        "id": t.id,
+        "merchant": t.merchant,
+        "amount_eur": t.amount_eur,
+        "timestamp": t.created_at,
+        "category": _infer_category(t.merchant),
+    }
+
+
+# Lightweight merchant -> category map, used both for seeded history and any
+# new transaction that comes through. Keep aligned with MERCHANT_QUALIFIERS
+# in risk_embeddings.py — they should describe the same world.
+_CATEGORY_MAP: dict[str, str] = {
+    "Albert Heijn": "groceries",
+    "Jumbo": "groceries",
+    "Lidl": "groceries",
+    "Spotify": "subscription",
+    "Spotify AB": "subscription",
+    "Netflix": "subscription",
+    "Apple": "digital",
+    "NS Reizigers": "transport",
+    "GVB": "transport",
+    "Bol.com": "shopping",
+    "KLM": "travel",
+    "Booking.com": "travel",
+    "Etsy": "shopping",
+    "Ticketmaster": "events",
+    "Uber": "transport",
+    "Stichting Woonbron": "rent",
+    "Bunq Payroll BV": "income",
+    "FastWire": "wire transfer",
+    "Unknown LLP": "wire transfer",
+    "QuickCash Transfer": "wire transfer",
+    "Crypto Vault Ltd": "crypto",
+    "Offshore Holdings": "wire transfer",
+}
+
+
+def _infer_category(merchant: str) -> str:
+    return _CATEGORY_MAP.get(merchant, "uncategorized")
+
+
+async def _embed_tx(tx_dict: dict[str, Any], history_for_descriptor: list[dict]) -> np.ndarray | None:
+    """Embed a single tx and return its L2-normalized vector, or None."""
+    desc = risk.descriptor_for(tx_dict, history_for_descriptor)
+    raw = await embed_text(desc)
+    if raw is None:
+        return None
+    v = np.array(raw, dtype=np.float32)
+    n = float(np.linalg.norm(v))
+    if n == 0:
+        return None
+    return v / n
+
+
+async def initialize() -> None:
+    """Eager-embed all transactions in the DB via a single batch call.
+
+    Idempotent. Uses batch embedding so 50+ transactions complete in one
+    round-trip instead of fifty.
+    """
+    global _INIT_DONE
+    async with _INIT_LOCK:
+        if _INIT_DONE:
+            return
+        with SessionLocal() as db:
+            txs = list(db.scalars(select(Transaction).order_by(Transaction.created_at.asc())))
+        if not txs:
+            log.info("embedding_cache_init_empty")
+            _INIT_DONE = True
+            return
+
+        # Build descriptors with per-tx as-of history (older context only).
+        descriptors: list[str] = []
+        running: list[dict[str, Any]] = []
+        for t in txs:
+            d = _tx_dict(t)
+            descriptors.append(risk.descriptor_for(d, running))
+            running.append(d)
+
+        vecs = await embed_texts(descriptors)
+        embedded = 0
+        failed = 0
+        for t, raw in zip(txs, vecs, strict=True):
+            if raw is None:
+                failed += 1
+                continue
+            v = np.array(raw, dtype=np.float32)
+            n = float(np.linalg.norm(v))
+            if n == 0:
+                failed += 1
+                continue
+            _CACHE[t.id] = v / n
+            embedded += 1
+        log.info("embedding_cache_init_done", embedded=embedded, failed=failed, total=len(txs))
+        _INIT_DONE = True
+
+
+def history_dicts() -> list[dict[str, Any]]:
+    """Return all cached history transactions as dicts (for descriptor + scoring)."""
+    with SessionLocal() as db:
+        txs = list(db.scalars(select(Transaction).order_by(Transaction.created_at.asc())))
+    return [_tx_dict(t) for t in txs]
+
+
+def history_vectors(history: list[dict[str, Any]]) -> np.ndarray | None:
+    """Return aligned (N, EMBED_DIM) array of cached vectors. None if empty."""
+    vecs = [_CACHE[h["id"]] for h in history if h["id"] in _CACHE]
+    if not vecs:
+        return None
+    return np.stack(vecs)
+
+
+def cache_size() -> int:
+    return len(_CACHE)
+
+
+def reset() -> None:
+    """Clear the cache. Called from mock_bunq.reset_all()."""
+    global _INIT_DONE
+    _CACHE.clear()
+    _INIT_DONE = False
+
+
+async def add_transaction(tx_dict: dict[str, Any]) -> None:
+    """Embed and cache a single new transaction. Best-effort — errors logged.
+
+    Called after a NO_RISK tx auto-approves, or after a verification completes,
+    so the next risk score has the new history baked in.
+    """
+    history = [d for d in history_dicts() if d["id"] != tx_dict.get("id")]
+    v = await _embed_tx(tx_dict, history)
+    if v is not None and "id" in tx_dict:
+        _CACHE[tx_dict["id"]] = v

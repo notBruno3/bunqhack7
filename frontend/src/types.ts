@@ -59,6 +59,29 @@ export interface VerifyResult {
   geminiSummary?: GeminiSummary
 }
 
+export type QuestionPurpose =
+  | 'baseline'
+  | 'intent'
+  | 'context'
+  | 'knowledge_check'
+  | 'stress_probe'
+
+export interface VerificationQuestion {
+  id: string
+  text: string
+  purpose: QuestionPurpose
+  expected_answer_shape?: string
+}
+
+export interface QuestionTurn {
+  id: string
+  text: string
+  purpose: QuestionPurpose
+  status: 'pending' | 'speaking' | 'listening' | 'scoring' | 'done'
+  scores?: HumeScores
+  delta_vs_baseline?: { fear: number; distress: number; anxiety: number }
+}
+
 export interface DemoButton {
   label: string
   scenario: string | null  // null = force NO_RISK, no scenario pin

@@ -12,9 +12,11 @@ import type {
   DemoButton,
   GeminiSummary,
   HumeScores,
+  QuestionTurn,
   Tier,
   Transaction,
   User,
+  VerificationQuestion,
   VerifyResult,
 } from './types'
 
@@ -37,6 +39,8 @@ export default function App() {
   const [videoStream, setVideoStream] = useState<MediaStream | null>(null)
   const [audioSource, setAudioSource] = useState<AudioSource>('silent')
   const [verifyResult, setVerifyResult] = useState<VerifyResult | null>(null)
+  const [turns, setTurns] = useState<QuestionTurn[]>([])
+  const [currentQuestion, setCurrentQuestion] = useState<VerificationQuestion | null>(null)
 
   const [isAutopilot, setIsAutopilot] = useState(false)
   const [cinematicStep, setCinematicStep] = useState(0)
@@ -96,6 +100,8 @@ export default function App() {
       setVerifyResult(null)
       setVideoStream(null)
       setAudioSource('silent')
+      setTurns([])
+      setCurrentQuestion(null)
 
       // Refresh transaction list so the PENDING_VERIFICATION row appears
       await loadData()
@@ -110,6 +116,8 @@ export default function App() {
           onCountdown: setCountdown,
           onVideoStream: setVideoStream,
           onAudioSource: setAudioSource,
+          onTurnsUpdate: setTurns,
+          onCurrentQuestion: setCurrentQuestion,
           onComplete: (result) => {
             setVerifyResult(result)
             // Refresh to show final status (HELD_FOR_REVIEW / FROZEN / APPROVED)
@@ -218,6 +226,8 @@ export default function App() {
                 videoStream={videoStream}
                 audioSource={audioSource}
                 merchant={verifyingMerchant}
+                turns={turns}
+                currentQuestion={currentQuestion}
               />
             )}
             {screen === 'result' && verifyResult && (

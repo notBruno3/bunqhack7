@@ -67,11 +67,27 @@ class WsClientStart(BaseModel):
 class WsClientAudioChunk(BaseModel):
     type: Literal["audio_chunk"] = "audio_chunk"
     data: str  # base64 pcm16 16kHz mono
+    q_id: str | None = None  # which question this chunk is for (Phase 2+)
+
+
+class WsClientAnswerEnd(BaseModel):
+    """Phase 2: client signals it has finished sending audio for a given question."""
+
+    type: Literal["answer_end"] = "answer_end"
+    q_id: str
+    transcript: str = ""  # browser-side STT, optional
 
 
 class WsClientVideoFrame(BaseModel):
     type: Literal["video_frame"] = "video_frame"
     data: str  # base64 jpeg
+
+
+class WsClientGemini(BaseModel):
+    """Phase 2: client forwards its frontend-computed Gemini summary."""
+
+    type: Literal["client_gemini"] = "client_gemini"
+    summary: dict
 
 
 class WsClientEnd(BaseModel):
@@ -81,11 +97,14 @@ class WsClientEnd(BaseModel):
 class WsServerReady(BaseModel):
     type: Literal["ready"] = "ready"
     tier: Tier
+    questions: list[dict] = Field(default_factory=list)
 
 
 class WsServerHumePartial(BaseModel):
     type: Literal["hume_partial"] = "hume_partial"
     scores: HumeScores
+    q_id: str | None = None  # which question this score belongs to (Phase 2+)
+    delta_vs_baseline: dict[str, float] | None = None
 
 
 class WsServerGeminiPartial(BaseModel):
@@ -105,15 +124,29 @@ class WsServerError(BaseModel):
     reason: str
 
 
+class QuestionAnswer(BaseModel):
+    """One question + the user's answer + the Hume bucket for that answer."""
+
+    id: str
+    text: str
+    purpose: Literal["baseline", "intent", "context", "knowledge_check", "stress_probe"]
+    transcript: str = ""
+    hume_scores: HumeScores | None = None
+    is_baseline: bool = False
+    delta_vs_baseline: dict[str, float] | None = None
+
+
 class AuditLogOut(BaseModel):
     id: str
-    verification_id: str
+    verification_id: str | None = None
     transaction_id: str
     tier: Tier
     hume_scores: HumeScores | None = None
     gemini_summary: GeminiSummary | None = None
     merchant_reputation: MerchantReputation
     verdict: Verdict
+    risk_signals: dict | None = None
+    questions: list[QuestionAnswer] | None = None
     started_at: datetime
     decided_at: datetime
     duration_ms: int

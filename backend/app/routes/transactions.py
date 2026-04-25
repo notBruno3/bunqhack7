@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..models import AuditLog, Transaction, Verification
 from ..schemas import TransactionInitiateReq, TransactionInitiateRes, Verdict
-from ..services import merchant_check, mock_bunq, risk_scorer
+from ..services import embedding_cache, merchant_check, mock_bunq, risk_scorer
 from ..util import new_id
 
 router = APIRouter()
@@ -44,8 +44,10 @@ def list_transactions(db: Session = Depends(get_db)) -> list[dict]:
 
 
 @router.post("/transaction/initiate", response_model=TransactionInitiateRes)
-def initiate(req: TransactionInitiateReq, db: Session = Depends(get_db)) -> TransactionInitiateRes:
-    tier = risk_scorer.classify(req.amount_eur, req.merchant, explicit=req.force_tier)
+async def initiate(req: TransactionInitiateReq, db: Session = Depends(get_db)) -> TransactionInitiateRes:
+    tier, risk_scores = await risk_scorer.classify_async(
+        req.amount_eur, req.merchant, explicit=req.force_tier
+    )
     reputation = merchant_check.lookup(req.merchant)
 
     tx_id = new_id("txn")
@@ -64,27 +66,47 @@ def initiate(req: TransactionInitiateReq, db: Session = Depends(get_db)) -> Tran
         # Write an audit row even for clean transactions — the pitch says every
         # transaction generates evidence. Keeps the compliance dashboard honest.
         now = datetime.utcnow()
-        db.add(
-            AuditLog(
-                id=new_id("aud"),
-                verification_id="",
-                transaction_id=tx_id,
-                tier=tier,
-                hume_scores=None,
-                gemini_summary=None,
-                merchant_reputation=reputation,
-                verdict=Verdict(
-                    verdict="APPROVED",
-                    confidence=1.0,
-                    rationale="No-risk tier: below thresholds and merchant reputable.",
-                    recommended_action="Proceed.",
-                ).model_dump(),
-                started_at=now,
-                decided_at=now,
-                duration_ms=0,
-            )
+        rationale = (
+            "No-risk tier: behavioral signals match user's normal pattern."
+            if risk_scores
+            else "No-risk tier: below thresholds and merchant reputable."
         )
+        audit = AuditLog(
+            id=new_id("aud"),
+            verification_id=None,
+            transaction_id=tx_id,
+            tier=tier,
+            hume_scores=None,
+            gemini_summary=None,
+            merchant_reputation=reputation,
+            verdict=Verdict(
+                verdict="APPROVED",
+                confidence=1.0,
+                rationale=rationale,
+                recommended_action="Proceed.",
+            ).model_dump(),
+            risk_signals=risk_scores,
+            started_at=now,
+            decided_at=now,
+            duration_ms=0,
+        )
+        db.add(audit)
         db.commit()
+
+        # Cache the new embedding so future scores see it.
+        try:
+            await embedding_cache.add_transaction(
+                {
+                    "id": tx_id,
+                    "merchant": req.merchant,
+                    "amount_eur": req.amount_eur,
+                    "timestamp": now,
+                    "category": embedding_cache._infer_category(req.merchant),
+                }
+            )
+        except Exception:  # noqa: BLE001 — embedding miss must not fail the tx
+            pass
+
         return TransactionInitiateRes(
             transaction_id=tx_id,
             tier=tier,
@@ -93,7 +115,10 @@ def initiate(req: TransactionInitiateReq, db: Session = Depends(get_db)) -> Tran
         )
 
     ver_id = new_id("ver")
-    db.add(Verification(id=ver_id, transaction_id=tx_id, tier=tier, status="PENDING"))
+    ver = Verification(id=ver_id, transaction_id=tx_id, tier=tier, status="PENDING")
+    if risk_scores is not None:
+        ver.risk_signals = risk_scores
+    db.add(ver)
     db.commit()
 
     return TransactionInitiateRes(

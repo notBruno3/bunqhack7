@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import settings
 from .db import init_db
 from .routes import admin, mock_control, transactions, verify
-from .services import mock_bunq
+from .services import embedding_cache, mock_bunq
 from .state import state
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -30,6 +30,14 @@ async def lifespan(_app: FastAPI):
     mock_bunq.seed_if_empty()
     state.mock_mode = settings.mock_mode
     log.info("startup", mock_mode=state.mock_mode, db_url=settings.db_url)
+    # Pre-embed the user's seeded history so first-call latency is cheap.
+    # Best-effort: if Google API is down, the risk scorer falls back to the
+    # amount-threshold rule transparently.
+    try:
+        await embedding_cache.initialize()
+        log.info("embedding_cache_ready", size=embedding_cache.cache_size())
+    except Exception as e:  # noqa: BLE001
+        log.warning("embedding_cache_init_failed", error=str(e))
     yield
 
 

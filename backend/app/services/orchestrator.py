@@ -70,6 +70,8 @@ async def run_verification(
         gemini_summary=gemini_summary.model_dump() if gemini_summary else None,
         merchant_reputation=transaction.merchant_reputation,
         verdict=verdict.model_dump(),
+        risk_signals=getattr(verification, "risk_signals", None),
+        questions=getattr(verification, "questions", None),
         started_at=started_at,
         decided_at=decided_at,
         duration_ms=duration_ms,
