@@ -1,33 +1,33 @@
 """In-memory embedding cache for the user's historical transactions.
 
-Pre-embedded at startup (cheap — gemini-embedding-2 is ~$0.20/M tokens, the
-seeded history is well under a thousand tokens total). Keyed by tx_id.
+Pre-embedded on first risk score (cheap — gemini-embedding-2 is ~$0.20/M
+tokens, the seeded history is well under a thousand tokens total). Keyed by
+tx_id, scoped to the current visitor's session.
 
 Why in-memory not sqlite-vec: <100 vectors per user, linear scan in numpy is
 sub-millisecond, and shipping a native sqlite extension across Windows demo
 machines is a portability landmine we don't need.
+
+The cache lives on the per-session object (see session_manager.Session). All
+helpers below resolve `current()` and read/write its `embed_cache` dict so
+two visitors don't pollute each other's history baseline.
 """
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 import numpy as np
 import structlog
 from sqlalchemy import select
 
+from .. import session_manager
 from ..db import SessionLocal
 from ..integrations.gemini_client import EMBED_DIM, embed_text, embed_texts
 from ..models import Transaction
 from . import risk_embeddings as risk
 
 log = structlog.get_logger()
-
-# tx_id -> L2-normalized np.float32 vector of EMBED_DIM
-_CACHE: dict[str, np.ndarray] = {}
-_INIT_LOCK = asyncio.Lock()
-_INIT_DONE = False
 
 
 def _tx_dict(t: Transaction) -> dict[str, Any]:
@@ -88,20 +88,20 @@ async def _embed_tx(tx_dict: dict[str, Any], history_for_descriptor: list[dict])
 
 
 async def initialize() -> None:
-    """Eager-embed all transactions in the DB via a single batch call.
+    """Eager-embed all transactions in the current session's DB.
 
-    Idempotent. Uses batch embedding so 50+ transactions complete in one
-    round-trip instead of fifty.
+    Idempotent per-session. Uses batch embedding so 50+ transactions complete
+    in one round-trip instead of fifty.
     """
-    global _INIT_DONE
-    async with _INIT_LOCK:
-        if _INIT_DONE:
+    sess = session_manager.current()
+    async with sess.embed_init_lock:
+        if sess.embed_init_done:
             return
         with SessionLocal() as db:
             txs = list(db.scalars(select(Transaction).order_by(Transaction.created_at.asc())))
         if not txs:
-            log.info("embedding_cache_init_empty")
-            _INIT_DONE = True
+            log.info("embedding_cache_init_empty", session_id=sess.id)
+            sess.embed_init_done = True
             return
 
         # Build descriptors with per-tx as-of history (older context only).
@@ -124,10 +124,16 @@ async def initialize() -> None:
             if n == 0:
                 failed += 1
                 continue
-            _CACHE[t.id] = v / n
+            sess.embed_cache[t.id] = v / n
             embedded += 1
-        log.info("embedding_cache_init_done", embedded=embedded, failed=failed, total=len(txs))
-        _INIT_DONE = True
+        log.info(
+            "embedding_cache_init_done",
+            session_id=sess.id,
+            embedded=embedded,
+            failed=failed,
+            total=len(txs),
+        )
+        sess.embed_init_done = True
 
 
 def history_dicts() -> list[dict[str, Any]]:
@@ -149,21 +155,23 @@ def history_dicts() -> list[dict[str, Any]]:
 
 def history_vectors(history: list[dict[str, Any]]) -> np.ndarray | None:
     """Return aligned (N, EMBED_DIM) array of cached vectors. None if empty."""
-    vecs = [_CACHE[h["id"]] for h in history if h["id"] in _CACHE]
+    cache = session_manager.current().embed_cache
+    vecs = [cache[h["id"]] for h in history if h["id"] in cache]
     if not vecs:
         return None
     return np.stack(vecs)
 
 
 def cache_size() -> int:
-    return len(_CACHE)
+    sess = session_manager.current_or_none()
+    return len(sess.embed_cache) if sess is not None else 0
 
 
 def reset() -> None:
-    """Clear the cache. Called from mock_bunq.reset_all()."""
-    global _INIT_DONE
-    _CACHE.clear()
-    _INIT_DONE = False
+    """Clear the current session's cache. Called from mock_bunq.reset_all()."""
+    sess = session_manager.current()
+    sess.embed_cache.clear()
+    sess.embed_init_done = False
 
 
 async def add_transaction(tx_dict: dict[str, Any]) -> None:
@@ -175,4 +183,4 @@ async def add_transaction(tx_dict: dict[str, Any]) -> None:
     history = [d for d in history_dicts() if d["id"] != tx_dict.get("id")]
     v = await _embed_tx(tx_dict, history)
     if v is not None and "id" in tx_dict:
-        _CACHE[tx_dict["id"]] = v
+        session_manager.current().embed_cache[tx_dict["id"]] = v

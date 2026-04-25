@@ -33,6 +33,7 @@ import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
 
+from .. import session_manager
 from ..db import SessionLocal
 from ..integrations import claude_client, gemini_client, hume_client
 from ..models import AuditLog, Ticket, Transaction, Verification
@@ -63,6 +64,17 @@ def _delta_vs_baseline(scores: HumeScores, baseline: HumeScores | None) -> dict[
 
 @router.websocket("/ws/verify/{verification_id}")
 async def verify_ws(websocket: WebSocket, verification_id: str) -> None:
+    # WS routes bypass HTTP middleware — bind the per-visitor session manually
+    # from the ?sid= query string before touching the DB or embedding cache.
+    sid = websocket.query_params.get("sid")
+    if not sid:
+        await websocket.accept()
+        await websocket.send_json(WsServerError(reason="missing_session_id").model_dump())
+        await websocket.close()
+        return
+    sess = session_manager.get_or_create(sid)
+    token = session_manager.bind(sess)
+
     await websocket.accept()
     db: Session = SessionLocal()
     try:
@@ -220,6 +232,7 @@ async def verify_ws(websocket: WebSocket, verification_id: str) -> None:
             pass
     finally:
         db.close()
+        session_manager.unbind(token)
 
 
 async def _finalize_verification(

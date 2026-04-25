@@ -1,8 +1,10 @@
-"""Ephemeral in-process state used to script the live demo.
+"""Per-session demo knobs (force_tier, scenario, mock_mode).
 
-This is intentionally separate from the persistent DB: the demo operator
-pokes these knobs through /api/mock/* and the orchestrator reads them
-during a verification. Nothing here survives a restart.
+The demo operator pokes these through /api/mock/*. They are NOT shared across
+visitors — each browser session has its own DemoState object held on the
+session_manager.Session. The `state` symbol exported below is a proxy whose
+attribute reads/writes route to `current().demo_state`, so existing call
+sites (`state.scenario = "..."`) keep working unchanged.
 """
 
 from __future__ import annotations
@@ -31,4 +33,32 @@ class DemoState:
     mock_mode: bool = field(default=True)
 
 
-state = DemoState()
+class _DemoStateProxy:
+    """Attribute-access proxy to `current().demo_state`.
+
+    Falls back to a module-level default DemoState when no session is bound
+    (e.g., during startup logging before any request arrives). This default
+    is read-only in practice — callers that mutate run inside a request
+    where a real session is bound.
+    """
+
+    __slots__ = ()
+
+    def _target(self) -> DemoState:
+        # Local import to dodge the import cycle with session_manager.
+        from . import session_manager
+
+        sess = session_manager.current_or_none()
+        if sess is not None:
+            return sess.demo_state
+        return _DEFAULT_STATE
+
+    def __getattr__(self, name: str):
+        return getattr(self._target(), name)
+
+    def __setattr__(self, name: str, value) -> None:
+        setattr(self._target(), name, value)
+
+
+_DEFAULT_STATE = DemoState()
+state = _DemoStateProxy()

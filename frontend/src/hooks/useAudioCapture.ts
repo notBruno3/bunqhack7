@@ -11,6 +11,7 @@ export function useAudioCapture() {
   const audioCtxRef = useRef<AudioContext | null>(null)
   const processorRef = useRef<ScriptProcessorNode | null>(null)
   const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null)
+  const analyserRef = useRef<AnalyserNode | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const pcmQueue = useRef<Int16Array[]>([])
   const isSilentRef = useRef(false)
@@ -33,6 +34,11 @@ export function useAudioCapture() {
       const source = ctx.createMediaStreamSource(stream)
       sourceNodeRef.current = source
 
+      const analyser = ctx.createAnalyser()
+      analyser.fftSize = 64
+      analyser.smoothingTimeConstant = 0.8
+      analyserRef.current = analyser
+
       // ScriptProcessorNode: 4096 samples per callback, 1 in, 1 out
       // eslint-disable-next-line @typescript-eslint/no-deprecated
       const processor = ctx.createScriptProcessor(4096, 1, 1)
@@ -51,7 +57,8 @@ export function useAudioCapture() {
         pcmQueue.current.push(int16)
       }
 
-      source.connect(processor)
+      source.connect(analyser)
+      analyser.connect(processor)
       processor.connect(ctx.destination)
 
       return 'mic'
@@ -63,10 +70,12 @@ export function useAudioCapture() {
 
   const stopCapture = useCallback(() => {
     processorRef.current?.disconnect()
+    analyserRef.current?.disconnect()
     sourceNodeRef.current?.disconnect()
     streamRef.current?.getTracks().forEach((t) => t.stop())
     audioCtxRef.current?.close().catch(() => {})
     processorRef.current = null
+    analyserRef.current = null
     sourceNodeRef.current = null
     streamRef.current = null
     audioCtxRef.current = null
@@ -91,7 +100,14 @@ export function useAudioCapture() {
     return int16ToBase64(combined)
   }, [])
 
-  return { startCapture, stopCapture, drainChunks }
+  const getFrequencies = useCallback((): Uint8Array | null => {
+    if (!analyserRef.current) return null
+    const data = new Uint8Array(analyserRef.current.frequencyBinCount)
+    analyserRef.current.getByteFrequencyData(data)
+    return data
+  }, [])
+
+  return { startCapture, stopCapture, drainChunks, getFrequencies }
 }
 
 function int16ToBase64(int16: Int16Array): string {

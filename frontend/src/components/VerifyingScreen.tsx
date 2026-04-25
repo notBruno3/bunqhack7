@@ -19,6 +19,7 @@ interface Props {
   merchant?: string
   turns: QuestionTurn[]
   currentQuestion: VerificationQuestion | null
+  getFrequencies: () => Uint8Array | null
 }
 
 const PURPOSE_LABELS: Record<QuestionTurn['purpose'], string> = {
@@ -56,8 +57,10 @@ export default function VerifyingScreen({
   merchant,
   turns,
   currentQuestion,
+  getFrequencies,
 }: Props) {
   const selfViewRef = useRef<HTMLVideoElement>(null)
+  const barsRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (selfViewRef.current && videoStream) {
@@ -69,6 +72,35 @@ export default function VerifyingScreen({
   // Phase 2: "processing" now means: all turns done OR (no turns yet, ready event still pending)
   const allDone = turns.length > 0 && turns.every((t) => t.status === 'done')
   const isProcessing = !currentQuestion && (allDone || turns.length === 0)
+
+  useEffect(() => {
+    if (audioSource !== 'mic' || isProcessing || !getFrequencies) return
+    let animId: number
+    const loop = () => {
+      animId = requestAnimationFrame(loop)
+      if (!barsRef.current) return
+      
+      const freqs = getFrequencies()
+      const children = barsRef.current.children
+      if (!freqs || children.length === 0) {
+        for (let i = 0; i < children.length; i++) {
+           ;(children[i] as HTMLElement).style.transform = 'scaleY(0.1)'
+        }
+        return
+      }
+
+      // 64 fftSize -> 32 bins. We take bins 2..25 for our 24 bars.
+      for (let i = 0; i < 24; i++) {
+        if (!children[i]) continue
+        const val = freqs[i + 2] || 0
+        const scale = 0.1 + (val / 255) * 1.2
+        ;(children[i] as HTMLElement).style.transform = `scaleY(${scale})`
+      }
+    }
+    loop()
+    return () => cancelAnimationFrame(animId)
+  }, [audioSource, isProcessing, getFrequencies])
+
   const isVideo = tier === 'HIGH_RISK'
   const timerStr = `0:${Math.max(0, countdown).toString().padStart(2, '0')}`
 
@@ -220,7 +252,7 @@ export default function VerifyingScreen({
             </p>
           </div>
 
-          <div className="flex items-center justify-center gap-1.5 h-16 w-full">
+          <div ref={barsRef} className="flex items-center justify-center gap-1.5 h-16 w-full">
             {[...Array(24)].map((_, i) => (
               <div
                 key={i}
@@ -228,10 +260,9 @@ export default function VerifyingScreen({
                 style={{
                   height: '100%',
                   opacity: audioSource === 'mic' && !isProcessing ? 0.8 : 0.2,
-                  animation: audioSource === 'mic' && !isProcessing ? `waveform ${0.3 + Math.random() * 0.4}s infinite alternate ease-in-out` : 'none',
-                  animationDelay: `${Math.random()}s`,
                   transformOrigin: 'bottom',
-                  transform: audioSource === 'mic' && !isProcessing ? 'scaleY(0.2)' : 'scaleY(0.1)',
+                  transform: 'scaleY(0.1)',
+                  transition: 'transform 0.05s linear',
                 }}
               />
             ))}

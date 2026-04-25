@@ -1,18 +1,22 @@
+"""DB facade — routes every session through the per-visitor session manager.
+
+Call sites still write `from .db import SessionLocal` and call `SessionLocal()`,
+or use `Depends(get_db)`. Both resolve to the in-memory engine owned by the
+current session (bound by middleware on HTTP and by the WS handler).
+"""
+
 from __future__ import annotations
 
 from collections.abc import Iterator
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session
 
-from .config import settings
+from . import session_manager
 
-engine = create_engine(
-    settings.db_url,
-    connect_args={"check_same_thread": False} if settings.db_url.startswith("sqlite") else {},
-    future=True,
-)
-SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False, future=True)
+
+def SessionLocal() -> Session:
+    """Return a SQLAlchemy session bound to the current request's engine."""
+    return session_manager.current().SessionLocal()
 
 
 def get_db() -> Iterator[Session]:
@@ -24,6 +28,9 @@ def get_db() -> Iterator[Session]:
 
 
 def init_db() -> None:
-    from . import models  # noqa: F401 — ensure ORM classes are registered
+    """No-op kept for backwards compatibility.
 
-    models.Base.metadata.create_all(engine)
+    Per-session engines are created and tables built lazily inside
+    `session_manager.get_or_create`.
+    """
+    return None

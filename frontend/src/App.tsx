@@ -243,6 +243,7 @@ export default function App() {
                 merchant={verifyingMerchant}
                 turns={turns}
                 currentQuestion={currentQuestion}
+                getFrequencies={verify.getFrequencies}
               />
             )}
             {screen === 'result' && verifyResult && (

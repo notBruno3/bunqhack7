@@ -53,7 +53,7 @@ function speak(text: string): Promise<void> {
 }
 
 export function useVerification() {
-  const { startCapture, stopCapture, drainChunks } = useAudioCapture()
+  const { startCapture, stopCapture, drainChunks, getFrequencies } = useAudioCapture()
   const wsRef = useRef<WebSocket | null>(null)
   const intervalsRef = useRef<number[]>([])
   const videoStreamRef = useRef<MediaStream | null>(null)
@@ -354,5 +354,5 @@ export function useVerification() {
     [startCapture, stopCapture, drainChunks, cleanup],
   )
 
-  return { run, cleanup }
+  return { run, cleanup, getFrequencies }
 }
