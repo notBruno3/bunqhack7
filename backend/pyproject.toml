@@ -1,0 +1,36 @@
+[project]
+name = "consent-backend"
+version = "0.1.0"
+description = "Transaction intent verification backend (Project Consent)"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "sqlalchemy>=2.0",
+    "python-multipart>=0.0.9",
+    "websockets>=12",
+    "httpx>=0.27",
+    "anthropic>=0.40",
+    "hume>=0.7",
+    "google-genai>=0.3",
+    "structlog>=24.1",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.5",
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+# B008: FastAPI uses `param = Depends(...)` idiomatically.
+ignore = ["E501", "B008"]
